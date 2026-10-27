@@ -15,6 +15,10 @@ const configPath = join(temporary, 'electron-builder.cjs')
 // Select the upstream production profile without exposing upstream product identifiers here.
 const channelKey = `${manifest.name.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}_BUILD_CHANNEL`
 const env = { ...process.env, [channelKey]: 'stable' }
+// Missing Actions secrets become empty strings; the macOS signer treats an empty link as a file path.
+for (const key of ['CSC_LINK', 'CSC_KEY_PASSWORD', 'WIN_CSC_LINK', 'WIN_CSC_KEY_PASSWORD', 'APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD', 'APPLE_TEAM_ID']) {
+  if (env[key] === '') delete env[key]
+}
 if (!env.CSC_LINK) env.CSC_IDENTITY_AUTO_DISCOVERY = 'false'
 try {
   await writeFile(configPath, `

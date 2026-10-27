@@ -128,9 +128,20 @@ test('packaging preserves upstream product names and embeds the generated releas
   await writeFile(join(builderDirectory, 'cli.js'), `
     const config = require(process.argv[process.argv.indexOf('--config') + 1])
     require('node:fs').writeFileSync('received-config.json', JSON.stringify(config))
+    require('node:fs').writeFileSync('received-signing-env.json', JSON.stringify({
+      cscLinkPresent: Object.hasOwn(process.env, 'CSC_LINK'),
+      cscPasswordPresent: Object.hasOwn(process.env, 'CSC_KEY_PASSWORD'),
+      appleIdPresent: Object.hasOwn(process.env, 'APPLE_ID'),
+      applePasswordPresent: Object.hasOwn(process.env, 'APPLE_APP_SPECIFIC_PASSWORD'),
+      appleTeamPresent: Object.hasOwn(process.env, 'APPLE_TEAM_ID')
+    }))
   `)
+  const buildEnv = {
+    ...process.env, BUILD_VERSION: version, BUILD_PLATFORM: 'macos', BUILD_ARCH: 'arm64', ORIGINAL_PRODUCT_BUILD_CHANNEL: 'unexpected',
+    CSC_LINK: '', CSC_KEY_PASSWORD: '', APPLE_ID: '', APPLE_APP_SPECIFIC_PASSWORD: '', APPLE_TEAM_ID: ''
+  }
   const result = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/package.mjs', import.meta.url)), options.sourceDirectory], {
-    env: { ...process.env, BUILD_VERSION: version, BUILD_PLATFORM: 'linux', BUILD_ARCH: 'x64', ORIGINAL_PRODUCT_BUILD_CHANNEL: 'unexpected', CSC_LINK: '' },
+    env: buildEnv,
     encoding: 'utf8'
   })
   assert.equal(result.status, 0, result.stderr)
@@ -144,7 +155,22 @@ test('packaging preserves upstream product names and embeds the generated releas
   assert.equal(config.appId, 'com.example.cove')
   assert.equal(config.directories.output, 'release')
   assert.equal(config.publish, null)
+  assert.equal(config.mac.identity, '-')
+  assert.equal(config.mac.hardenedRuntime, false)
+  assert.equal(config.mac.notarize, false)
+  assert.deepEqual(JSON.parse(await readFile(join(options.sourceDirectory, 'received-signing-env.json'), 'utf8')), {
+    cscLinkPresent: false, cscPasswordPresent: false, appleIdPresent: false, applePasswordPresent: false, appleTeamPresent: false
+  })
   assert.equal(JSON.parse(await readFile(join(options.sourceDirectory, 'package.json'), 'utf8')).version, sourceVersion)
+
+  const signed = spawnSync(process.execPath, [fileURLToPath(new URL('../scripts/package.mjs', import.meta.url)), options.sourceDirectory], {
+    env: { ...buildEnv, CSC_LINK: 'fixture-certificate', CSC_KEY_PASSWORD: 'fixture-password' }, encoding: 'utf8'
+  })
+  assert.equal(signed.status, 0, signed.stderr)
+  const signingEnv = JSON.parse(await readFile(join(options.sourceDirectory, 'received-signing-env.json'), 'utf8'))
+  assert.equal(signingEnv.cscLinkPresent, true)
+  assert.equal(signingEnv.cscPasswordPresent, true)
+  assert.equal('identity' in JSON.parse(await readFile(join(options.sourceDirectory, 'received-config.json'), 'utf8')).mac, false)
 })
 
 async function writeInstallers(options, target) {
