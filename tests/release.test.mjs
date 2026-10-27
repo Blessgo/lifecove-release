@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createBuildPlan, installerNames, releaseVersion, selectTargets, TARGETS } from '../scripts/build-plan.mjs'
 import { assembleRelease, collectArtifacts, sha256 } from '../scripts/artifacts.mjs'
-import { resolveSourceRepository } from '../scripts/source-repository.mjs'
+import { normalizePrivateToken, resolveSourceRepository, verifySourceAccess } from '../scripts/source-repository.mjs'
 
 const version = '0.1.42'
 const sourceVersion = '0.1.0'
@@ -22,6 +22,30 @@ test('source repository is derived from the release name without a hardcoded add
   assert.throws(() => resolveSourceRepository('example/downloads'), /COVE_SOURCE_REPOSITORY/)
   assert.throws(() => resolveSourceRepository('example/cove-release', 'example/private-cove\n'), /COVE_SOURCE_REPOSITORY/)
   assert.throws(() => resolveSourceRepository('example/cove-release', 'example/cove-release'), /COVE_SOURCE_REPOSITORY/)
+})
+
+test('private token normalization trims pasted whitespace without accepting embedded headers', () => {
+  assert.equal(normalizePrivateToken(' \tfixture-token\r\n'), 'fixture-token')
+  assert.throws(() => normalizePrivateToken('Bearer fixture-token'), /raw token value/)
+  assert.throws(() => normalizePrivateToken(' \n'), /required/)
+})
+
+test('source access checks require contents access for the requested ref', async () => {
+  const requests = []
+  await verifySourceAccess({
+    repository: 'example/cove', token: 'fixture-token', ref: 'feature/ui', report: () => {},
+    request: async (url, options) => {
+      requests.push({ url, options })
+      return { ok: true, status: 200, json: async () => ({}) }
+    }
+  })
+  assert.equal(requests.length, 2)
+  assert.ok(requests[1].url.endsWith('/contents/package.json?ref=feature%2Fui'))
+  assert.equal(requests[1].options.headers.Authorization, 'Bearer fixture-token')
+  await assert.rejects(verifySourceAccess({
+    repository: 'example/cove', token: 'fixture-token', ref: 'main', report: () => {},
+    request: async () => ({ ok: false, status: 403, json: async () => ({ message: 'Resource not accessible by personal access token' }) })
+  }), /HTTP 403, Resource not accessible by personal access token/)
 })
 
 test('a source version keeps its major.minor and gains the current build number', () => {
