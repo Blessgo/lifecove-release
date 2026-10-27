@@ -1,0 +1,11 @@
+/source/
+/release/
+node_modules/
+*.log
+.env
+.env.*
+*.private.pem
+*.key
+*.p12
+*.pfx
+.DS_Store
