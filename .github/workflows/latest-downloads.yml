@@ -1,0 +1,36 @@
+name: Backfill latest downloads
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/artifacts.mjs'
+      - 'scripts/backfill-latest.mjs'
+      - '.github/workflows/latest-downloads.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cove-latest-download-aliases
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Verify alias tooling
+        run: node --test
+      - name: Add missing fixed-name downloads to the current latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/backfill-latest.mjs

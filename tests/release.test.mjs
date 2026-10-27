@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createBuildPlan, installerNames, releaseVersion, selectTargets, TARGETS } from '../scripts/build-plan.mjs'
-import { assembleRelease, collectArtifacts, sha256 } from '../scripts/artifacts.mjs'
+import { assembleRelease, collectArtifacts, downloadAliases, sha256, writeDownloadAliases } from '../scripts/artifacts.mjs'
 import { normalizePrivateToken, resolveSourceRepository, verifySourceAccess } from '../scripts/source-repository.mjs'
 
 const version = '0.1.42'
@@ -232,7 +232,14 @@ test('release assembly verifies all six installers and writes address-free relea
   assert.equal(release.builds.length, 4)
   assert.equal(release.artifacts.length, 6)
   const sums = await readFile(join(options.directory, 'SHA256SUMS.txt'), 'utf8')
-  assert.equal(sums.trim().split('\n').length, 6)
+  assert.equal(sums.trim().split('\n').length, 10)
+  assert.equal(release.aliases.length, 4)
+  for (const alias of release.aliases) {
+    assert.equal(await sha256(join(options.directory, alias.file)), alias.sha256)
+    assert.deepEqual(await readFile(join(options.directory, alias.file)), await readFile(join(options.directory, alias.sourceFile)))
+    assert.ok(!alias.file.includes(version))
+  }
+  assert.equal((await readFile(join(options.directory, 'SHA256SUMS-latest.txt'), 'utf8')).trim().split('\n').length, 4)
   const info = JSON.parse(await readFile(join(options.directory, 'BUILD-INFO.json'), 'utf8'))
   assert.equal(info.version, version)
   assert.equal(info.buildNumber, '42')
@@ -245,6 +252,25 @@ test('a selected platform can be published as a complete release', async t => {
   const release = await assembleRelease(options)
   assert.equal(release.builds.length, 1)
   assert.equal(release.artifacts[0].file, 'original-product-0.1.42-win-x64.exe')
+  assert.equal(release.aliases[0].file, 'original-product-win-x64.exe')
+})
+
+test('alias creation verifies original bytes and refuses to overwrite an existing download', async t => {
+  const options = await completeRelease(t, 'windows')
+  const info = JSON.parse(await readFile(join(options.directory, 'BUILD-INFO-windows-x64.json'), 'utf8'))
+  const aliases = downloadAliases([info])
+  const aliasPath = join(options.directory, aliases[0].file)
+  await writeFile(aliasPath, 'already published bytes')
+  await assert.rejects(writeDownloadAliases({ directory: options.directory, aliases }), /EEXIST/)
+  assert.equal(await readFile(aliasPath, 'utf8'), 'already published bytes')
+  await rm(aliasPath)
+  const sourcePath = join(options.directory, aliases[0].sourceFile)
+  const bytes = await readFile(sourcePath)
+  bytes[0] ^= 1
+  await writeFile(sourcePath, bytes)
+  await assert.rejects(writeDownloadAliases({ directory: options.directory, aliases }), /checksum mismatch/)
+  await assert.rejects(readFile(aliasPath), /ENOENT/)
+  assert.throws(() => downloadAliases([info, info]), /Duplicate download alias/)
 })
 
 test('release assembly detects corruption even when file size is unchanged', async t => {

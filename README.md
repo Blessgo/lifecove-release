@@ -66,6 +66,12 @@ shasum -a 256 -c SHA256SUMS-macos-x64.txt
 
 需要校验全部平台文件时，使用汇总 `SHA256SUMS.txt`。Windows 可以使用 `Get-FileHash` 计算下载文件的 SHA-256，与清单比较。
 
+每次发行还会为已验证的 EXE、DMG 和 AppImage 创建不含版本号的下载副本，例如 `lifecove-win-x64.exe`、`lifecove-mac-arm64.dmg`、`lifecove-mac-x64.dmg` 和 `lifecove-linux-x86_64.AppImage`。这些副本与对应版本包的字节完全一致，校验值见 `SHA256SUMS-latest.txt`，也包含在汇总清单中。
+
+固定入口使用 `/releases/latest/download/<文件名>`，可以配合 Xget 的 `/gh/` 前缀加速。只有 `platform=all` 的完整三平台正式发行会被标记为 GitHub Latest；单平台发行仍可通过版本页面下载，不替换完整发行的 Latest 入口。
+
+现有版本缺少固定文件名时，可运行 **Actions → Backfill latest downloads** 为当前 Latest 补齐下载副本及校验清单。该流程检查原始安装包哈希，只添加缺失文件，不覆盖已发布的任何安装包；已有副本也会核对大小与 GitHub 的 SHA-256 摘要。
+
 ## 可选签名
 
 | Secret | 用途 |

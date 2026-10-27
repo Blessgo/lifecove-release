@@ -213,6 +213,8 @@ jobs:
             gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --draft --prerelease=false --title "cove $RELEASE_TAG" --notes-file release/RELEASE-NOTES.md
           fi
           gh release upload "$RELEASE_TAG" release/* --clobber
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --notes-file release/RELEASE-NOTES.md
+          latest_release=false
+          if [ "$BUILD_PLATFORM_SELECTION" = "all" ]; then latest_release=true; fi
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --latest="$latest_release" --notes-file release/RELEASE-NOTES.md
           release_url=$(gh release view "$RELEASE_TAG" --json url --jq .url)
           printf '\n[Download cove %s](%s)\n' "$RELEASE_TAG" "$release_url" >> "$GITHUB_STEP_SUMMARY"

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
+import { constants, createReadStream } from 'node:fs'
 import { copyFile, lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -15,6 +15,36 @@ export async function sha256(path) {
 
 function checksumText(artifacts) {
   return artifacts.map(item => `${item.sha256}  ${item.file}\n`).join('')
+}
+
+export function downloadAliases(builds) {
+  const aliases = []
+  for (const build of builds) {
+    const expected = installerNames({ version: build.version, platform: build.platform, arch: build.arch, installerPrefix: build.installerPrefix }).sort()
+    assert.deepEqual(build.artifacts.map(item => item.file).sort(), expected, 'Unexpected installer names in alias manifest')
+    for (const item of build.artifacts.filter(item => !item.file.endsWith('.zip'))) {
+      assert.ok(Number.isSafeInteger(item.size) && item.size > 0, 'Invalid alias size')
+      assert.match(item.sha256, /^[a-f0-9]{64}$/, 'Invalid alias checksum')
+      const suffix = item.file.slice(`${build.installerPrefix}-${build.version}`.length)
+      aliases.push({ file: `${build.installerPrefix}${suffix}`, sourceFile: item.file, size: item.size, sha256: item.sha256 })
+    }
+  }
+  assert.equal(new Set(aliases.map(item => item.file)).size, aliases.length, 'Duplicate download alias')
+  return aliases.sort((a, b) => a.file.localeCompare(b.file))
+}
+
+export async function writeDownloadAliases({ directory, aliases }) {
+  // Check every source before creating any files, including when backfilling a published release.
+  for (const alias of aliases) {
+    const path = join(directory, alias.sourceFile)
+    const stat = await lstat(path)
+    assert.ok(stat.isFile(), `Invalid alias source: ${alias.sourceFile}`)
+    assert.equal(stat.size, alias.size, `Alias source size mismatch: ${alias.sourceFile}`)
+    assert.equal(await sha256(path), alias.sha256, `Alias source checksum mismatch: ${alias.sourceFile}`)
+  }
+  for (const alias of aliases) {
+    await copyFile(join(directory, alias.sourceFile), join(directory, alias.file), constants.COPYFILE_EXCL)
+  }
 }
 
 function verifyBuildNumber(version, buildNumber) {
@@ -96,12 +126,15 @@ export async function assembleRelease({ directory, version, buildNumber, sourceS
   assert.equal(installerProducts.size, 1, 'Mismatched installer product names')
   assert.deepEqual((await readdir(directory)).sort(), expectedFiles.sort(), 'Unexpected files in release artifacts')
   artifacts.sort((a, b) => a.file.localeCompare(b.file))
-  await writeFile(join(directory, 'SHA256SUMS.txt'), checksumText(artifacts))
-  await writeFile(join(directory, 'BUILD-INFO.json'), `${JSON.stringify({ product: 'cove', version, buildNumber: String(buildNumber), sourceSha, releaseCommit, builds }, null, 2)}\n`)
+  const aliases = downloadAliases(builds)
+  await writeDownloadAliases({ directory, aliases })
+  await writeFile(join(directory, 'SHA256SUMS.txt'), checksumText([...artifacts, ...aliases]))
+  await writeFile(join(directory, 'SHA256SUMS-latest.txt'), checksumText(aliases))
+  await writeFile(join(directory, 'BUILD-INFO.json'), `${JSON.stringify({ product: 'cove', version, buildNumber: String(buildNumber), sourceSha, releaseCommit, builds, downloads: aliases }, null, 2)}\n`)
   const targets = builds.map(build => `${build.platform}/${build.arch}`).join(', ')
   const notes = `cove v${version}\n\nBuild: ${buildNumber}\n\nSource commit: ${sourceSha}\n\nPlatforms: ${targets}\n\nVerify downloads using SHA256SUMS.txt. BUILD-INFO.json records version and build details.\n\nCode signing depends on the configured CI certificates. macOS builds without a certificate use ad-hoc signing and are not notarized. Automatic updates are not configured by this workflow.\n`
   await writeFile(join(directory, 'RELEASE-NOTES.md'), notes)
-  return { builds, artifacts }
+  return { builds, artifacts, aliases }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
