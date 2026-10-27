@@ -1,0 +1,30 @@
+name: Check out cove
+description: Resolve and check out private cove source without embedding its address
+inputs:
+  token:
+    description: Private source access token
+    required: true
+  repository:
+    description: Optional private repository override
+    default: ''
+  ref:
+    description: Source branch, tag, or commit
+    default: main
+runs:
+  using: composite
+  steps:
+    - name: Resolve private source
+      id: address
+      shell: bash
+      env:
+        PRIVATE_TOKEN: ${{ inputs.token }}
+        SOURCE_REPOSITORY_OVERRIDE: ${{ inputs.repository }}
+        SOURCE_REF: ${{ inputs.ref }}
+      run: node "$GITHUB_ACTION_PATH/../../../scripts/source-repository.mjs"
+    - uses: actions/checkout@v7
+      with:
+        repository: ${{ steps.address.outputs.repository }}
+        ref: ${{ inputs.ref }}
+        token: ${{ steps.address.outputs.token }}
+        persist-credentials: false
+        path: source

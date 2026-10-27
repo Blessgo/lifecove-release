@@ -1,0 +1,218 @@
+name: Build cove
+run-name: cove · ${{ inputs.base_version || 'release' }} · build ${{ github.run_number }}
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source branch, tag, or commit
+        type: string
+        default: main
+        required: true
+      base_version:
+        description: Version series, e.g. v0.1 (empty uses source major.minor)
+        type: string
+      platform:
+        description: Target platform (macOS includes Intel and Apple Silicon)
+        type: choice
+        default: all
+        options: [all, windows, macos, linux]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cove-${{ github.event_name }}-${{ github.ref }}-${{ inputs.platform || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check release tooling
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: node --test
+      - name: Lint GitHub Actions workflow
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color .github/workflows/build.yml
+
+  prepare:
+    name: Resolve source and release version
+    if: github.event_name != 'pull_request'
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      platform: ${{ steps.plan.outputs.platform }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+      source_ref: ${{ steps.plan.outputs.source_ref }}
+      source_version: ${{ steps.plan.outputs.source_version }}
+      version: ${{ steps.plan.outputs.version }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Check out cove source
+        uses: ./.github/actions/checkout-cove
+        with:
+          token: ${{ secrets.PRIVATE_TOKEN }}
+          repository: ${{ secrets.COVE_SOURCE_REPOSITORY }}
+          ref: ${{ inputs.source_ref || 'main' }}
+      - name: Pin source and generate version
+        id: plan
+        env:
+          SOURCE_REF: ${{ inputs.source_ref || 'main' }}
+          REQUESTED_PLATFORM: ${{ inputs.platform || 'all' }}
+          BASE_VERSION: ${{ inputs.base_version }}
+        run: node scripts/build-plan.mjs source
+
+  verify:
+    name: Check cove source
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check out pinned source
+        uses: ./.github/actions/checkout-cove
+        with:
+          token: ${{ secrets.PRIVATE_TOKEN }}
+          repository: ${{ secrets.COVE_SOURCE_REPOSITORY }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - run: npm ci
+        working-directory: source
+      - name: Install Electron test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth libgtk-3-0t64 libnss3 libasound2t64 libgbm1
+      - run: npm run check
+        working-directory: source
+      - run: xvfb-run -a npm run test:e2e
+        working-directory: source
+
+  build:
+    name: Build ${{ matrix.platform }} ${{ matrix.arch }}
+    needs: [prepare, verify]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      BUILD_VERSION: ${{ needs.prepare.outputs.version }}
+      BUILD_PLATFORM: ${{ matrix.platform }}
+      BUILD_ARCH: ${{ matrix.arch }}
+      SOURCE_VERSION: ${{ needs.prepare.outputs.source_version }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      SOURCE_REF: ${{ needs.prepare.outputs.source_ref }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check out pinned source
+        uses: ./.github/actions/checkout-cove
+        with:
+          token: ${{ secrets.PRIVATE_TOKEN }}
+          repository: ${{ secrets.COVE_SOURCE_REPOSITORY }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+      - run: npm ci
+        working-directory: source
+      - run: npm run build
+        working-directory: source
+      - name: Package release installers
+        env:
+          CSC_LINK: ${{ matrix.platform == 'windows' && secrets.WINDOWS_CSC_LINK || matrix.platform == 'macos' && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'windows' && secrets.WINDOWS_CSC_KEY_PASSWORD || matrix.platform == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.platform == 'macos' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'macos' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'macos' && secrets.APPLE_TEAM_ID || '' }}
+        run: node scripts/package.mjs source
+      - name: Collect release installers and checksums
+        run: node scripts/artifacts.mjs collect source release
+      - name: Transfer installers to release job
+        uses: actions/upload-artifact@v7
+        with:
+          name: cove-${{ env.BUILD_VERSION }}-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+          overwrite: true
+
+  release:
+    name: Publish cove Release
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: cove-release-${{ needs.prepare.outputs.release_tag }}
+      cancel-in-progress: false
+    env:
+      BUILD_VERSION: ${{ needs.prepare.outputs.version }}
+      BUILD_PLATFORM_SELECTION: ${{ needs.prepare.outputs.platform }}
+      SOURCE_VERSION: ${{ needs.prepare.outputs.source_version }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: cove-${{ env.BUILD_VERSION }}-*
+          path: release
+          merge-multiple: true
+      - name: Verify release files and generate release notes
+        run: node scripts/artifacts.mjs release release
+      - name: Publish verified installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$RELEASE_TAG" --json isDraft > "$RUNNER_TEMP/existing-release.json"; then
+            node --input-type=module -e '
+              import { readFileSync } from "node:fs";
+              const release = JSON.parse(readFileSync(process.argv[1], "utf8"));
+              if (!release.isDraft) throw new Error("Refusing to replace an already published release");
+            ' "$RUNNER_TEMP/existing-release.json"
+          else
+            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --draft --prerelease=false --title "cove $RELEASE_TAG" --notes-file release/RELEASE-NOTES.md
+          fi
+          gh release upload "$RELEASE_TAG" release/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease=false --notes-file release/RELEASE-NOTES.md
+          release_url=$(gh release view "$RELEASE_TAG" --json url --jq .url)
+          printf '\n[Download cove %s](%s)\n' "$RELEASE_TAG" "$release_url" >> "$GITHUB_STEP_SUMMARY"
